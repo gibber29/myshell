@@ -9,3 +9,5 @@ struct Command {
     bool appendOutput = false;
     std::string inputFile;
 };
+
+Command parseRedirection(const std::vector<std::string>& tokens);
