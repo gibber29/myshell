@@ -1,5 +1,6 @@
 #include "Shell.hpp"
 #include "Tokenizer.hpp"
+#include "Parser.hpp"
 
 #include <cerrno>
 #include <cstdlib>
@@ -16,20 +17,24 @@ void Shell::run() {
         printPrompt();
 
         if (!readLine(line)) {
-            // EOF (Ctrl+D) — behave like a real shell and exit cleanly.
             std::cout << "\n";
             break;
         }
 
-        std::vector<std::string> args = tokenize(line);
+        std::vector<std::string> tokens = tokenize(line);
 
-        if (args.empty()) {
-            // Just whitespace or an empty line — do nothing, loop again.
+        if (tokens.empty()) {
             continue;
         }
 
         history_.push_back(line);
-        execute(args);
+
+        try {
+            Command command = parseRedirection(tokens);
+            execute(command);
+        } catch (const std::runtime_error& e) {
+            std::cerr << "Parse error: " << e.what() << "\n";
+        }
     }
 }
 
@@ -41,11 +46,15 @@ bool Shell::readLine(std::string& outLine) {
     return static_cast<bool>(std::getline(std::cin, outLine));
 }
 
-void Shell::execute(const std::vector<std::string>& args) {
-    if (isBuiltin(args[0])) {
-        runBuiltin(args);
+void Shell::execute(const Command& command) {
+    if (command.argv.empty()) {
+        return;
+    }
+
+    if (isBuiltin(command.argv[0])) {
+        runBuiltin(command.argv);
     } else {
-        runExternal(args);
+        runExternal(command);
     }
 }
 
@@ -68,8 +77,6 @@ void Shell::runBuiltin(const std::vector<std::string>& args) {
 }
 
 void Shell::builtinCd(const std::vector<std::string>& args) {
-    // TODO: handle `cd` with no args (should go to $HOME) and `cd -`
-    // (should go to the previous directory) — real shells support both.
     if (args.size() < 2) {
         std::cerr << "cd: expected an argument\n";
         return;
@@ -81,7 +88,6 @@ void Shell::builtinCd(const std::vector<std::string>& args) {
 }
 
 void Shell::builtinExit(const std::vector<std::string>& /*args*/) {
-    // TODO: support `exit <code>` and return it via std::exit / return code.
     running_ = false;
 }
 
@@ -93,18 +99,14 @@ void Shell::builtinHistory() const {
 
 // ---------------- External commands ----------------
 
-void Shell::runExternal(const std::vector<std::string>& args) {
-    // execvp needs a char* const argv[] terminated by a null pointer.
-    // We build that from our std::vector<std::string> right before
-    // forking — the strings themselves stay alive in `args` for the
-    // lifetime of this call, so the char* pointers into them are safe.
+void Shell::runExternal(const Command& command) {
     std::vector<char*> argv;
-    argv.reserve(args.size() + 1);
-    for (const auto& arg : args) {
-        // const_cast is safe here: execvp does not modify argv strings,
-        // the signature is just a historical wart in the POSIX API.
+    argv.reserve(command.argv.size() + 1);
+
+    for (const auto& arg : command.argv) {
         argv.push_back(const_cast<char*>(arg.c_str()));
     }
+
     argv.push_back(nullptr);
 
     pid_t pid = fork();
@@ -115,33 +117,15 @@ void Shell::runExternal(const std::vector<std::string>& args) {
     }
 
     if (pid == 0) {
-        // ---- Child process ----
-        // At this point the child is a near-exact copy of the shell:
-        // same open fds, same memory, same everything (copy-on-write).
-        // execvp REPLACES this process's image with the new program.
-        // If it succeeds, none of the code after this call ever runs.
         execvp(argv[0], argv.data());
 
-        // If we get here, execvp failed (e.g. command not found).
-        // Critical: use _exit(), not exit() or return. This is still
-        // a forked copy of the shell — exit() would run the shell's
-        // own atexit handlers / flush buffers that belong to the
-        // PARENT, which we don't want duplicated in the child.
-        std::cerr << args[0] << ": command not found\n";
-        _exit(127); // 127 is the conventional "command not found" code
+        std::cerr << command.argv[0] << ": command not found\n";
+        _exit(127);
     }
 
-    // ---- Parent process ----
-    // Block until this specific child changes state (here: exits).
-    // This is what makes the prompt wait for the command to finish
-    // instead of racing ahead immediately after fork().
     int status = 0;
+
     if (waitpid(pid, &status, 0) < 0) {
         std::cerr << "waitpid failed: " << std::strerror(errno) << "\n";
     }
-
-    // TODO (later): once you add background jobs (&), this is the
-    // function that needs to branch — either wait here (foreground)
-    // or record the pid and return immediately (background), reaping
-    // it later with waitpid(pid, &status, WNOHANG).
 }
