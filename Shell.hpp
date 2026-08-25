@@ -22,6 +22,7 @@ private:
 
     // fork -> execvp -> waitpid for a single external command.
     void runExternal(const std::vector<std::string>& args);
+    void runPipeline(const Pipeline& pipeline);
 
     // ---- Builtins ----
     // Builtins run IN the shell process itself (never forked), because
